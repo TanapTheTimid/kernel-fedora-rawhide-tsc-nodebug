@@ -119,8 +119,8 @@ Summary: The Linux kernel
 # Set debugbuildsenabled to 0 to not build a separate debug kernel, but
 #  to build the base kernel using the debug configuration. (Specifying
 #  the --with-release option overrides this setting.)
-%define debugbuildsenabled 0
-# define buildid .local
+%define debugbuildsenabled 1
+%define buildid .cust
 %define specversion 6.1.0
 %define patchversion 6.1
 %define pkgrelease 0.rc2.20221026git4dc12f37a8e9.23
@@ -156,7 +156,7 @@ Summary: The Linux kernel
 # kernel PAE (only valid for ARM (lpae))
 %define with_pae       %{?_without_pae:       0} %{?!_without_pae:       1}
 # kernel-debug
-%define with_debug     %{?_without_debug:     0} %{?!_without_debug:     1}
+%define with_debug 0
 # kernel-zfcpdump (s390 specific kernel for zfcpdump)
 %define with_zfcpdump  %{?_without_zfcpdump:  0} %{?!_without_zfcpdump:  1}
 # kernel-doc
@@ -171,7 +171,7 @@ Summary: The Linux kernel
 # bpf tool
 %define with_bpftool   %{?_without_bpftool:   0} %{?!_without_bpftool:   1}
 # kernel-debuginfo
-%define with_debuginfo %{?_without_debuginfo: 0} %{?!_without_debuginfo: 1}
+%define with_debuginfo 0
 # kernel-abi-stablelists
 %define with_kernel_abi_stablelists %{?_without_kernel_abi_stablelists: 0} %{?!_without_kernel_abi_stablelists: 1}
 # internal samples and selftests
@@ -207,7 +207,7 @@ Summary: The Linux kernel
 %define with_cross    %{?_with_cross:         1} %{?!_with_cross:        0}
 #
 # build a release kernel on rawhide
-%define with_release   %{?_with_release:      1} %{?!_with_release:      0}
+%define with_release 1
 
 # verbose build, i.e. no silent rules and V=1
 %define with_verbose %{?_with_verbose:        1} %{?!_with_verbose:      0}
