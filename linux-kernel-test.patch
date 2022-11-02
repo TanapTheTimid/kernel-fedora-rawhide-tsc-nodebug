@@ -1,451 +1,3 @@
-From 3193dbff37baf37af72f11bdcfbe3705d74ba5fa Mon Sep 17 00:00:00 2001
-From: Steven Noonan <steven@uplinklabs.net>
-Date: Wed, 17 Nov 2021 00:25:26 -0800
-Subject: [PATCH 28/39] x86: implement tsc=directsync for systems without
- IA32_TSC_ADJUST
-
-Signed-off-by: Steven Noonan <steven@uplinklabs.net>
----
- .../admin-guide/kernel-parameters.txt         |  2 +
- arch/x86/include/asm/tsc.h                    |  1 +
- arch/x86/kernel/tsc.c                         |  3 ++
- arch/x86/kernel/tsc_sync.c                    | 48 +++++++++++++++----
- 4 files changed, 44 insertions(+), 10 deletions(-)
-
-diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
-index c14b59da2319..d3a3377df9e4 100644
---- a/Documentation/admin-guide/kernel-parameters.txt
-+++ b/Documentation/admin-guide/kernel-parameters.txt
-@@ -6311,6 +6311,8 @@
- 			in situations with strict latency requirements (where
- 			interruptions from clocksource watchdog are not
- 			acceptable).
-+			[x86] directsync: attempt to sync the tsc via direct
-+			writes if MSR_IA32_TSC_ADJUST isn't available
- 
- 	tsc_early_khz=  [X86] Skip early TSC calibration and use the given
- 			value instead. Useful when the early TSC frequency discovery
-diff --git a/arch/x86/include/asm/tsc.h b/arch/x86/include/asm/tsc.h
-index fbdc3d951494..dc70909119e8 100644
---- a/arch/x86/include/asm/tsc.h
-+++ b/arch/x86/include/asm/tsc.h
-@@ -42,6 +42,7 @@ extern unsigned long native_calibrate_tsc(void);
- extern unsigned long long native_sched_clock_from_tsc(u64 tsc);
- 
- extern int tsc_clocksource_reliable;
-+extern int tsc_allow_direct_sync;
- #ifdef CONFIG_X86_TSC
- extern bool tsc_async_resets;
- #else
-diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
-index c2f80184fd33..b00dde2fd1cc 100644
---- a/arch/x86/kernel/tsc.c
-+++ b/arch/x86/kernel/tsc.c
-@@ -47,6 +47,7 @@ static unsigned int __initdata tsc_early_khz;
- static DEFINE_STATIC_KEY_FALSE(__use_tsc);
- 
- int tsc_clocksource_reliable;
-+int tsc_allow_direct_sync;
- 
- static u32 art_to_tsc_numerator;
- static u32 art_to_tsc_denominator;
-@@ -303,6 +304,8 @@ static int __init tsc_setup(char *str)
- 		mark_tsc_unstable("boot parameter");
- 	if (!strcmp(str, "nowatchdog"))
- 		no_tsc_watchdog = 1;
-+	if (!strcmp(str, "directsync"))
-+		tsc_allow_direct_sync = 1;
- 	return 1;
- }
- 
-diff --git a/arch/x86/kernel/tsc_sync.c b/arch/x86/kernel/tsc_sync.c
-index 9452dc9664b5..d9c4e48d93f6 100644
---- a/arch/x86/kernel/tsc_sync.c
-+++ b/arch/x86/kernel/tsc_sync.c
-@@ -32,6 +32,8 @@ struct tsc_adjust {
- static DEFINE_PER_CPU(struct tsc_adjust, tsc_adjust);
- static struct timer_list tsc_sync_check_timer;
- 
-+extern int tsc_allow_direct_sync;
-+
- /*
-  * TSC's on different sockets may be reset asynchronously.
-  * This may cause the TSC ADJUST value on socket 0 to be NOT 0.
-@@ -340,6 +342,8 @@ static cycles_t check_tsc_warp(unsigned int timeout)
-  */
- static inline unsigned int loop_timeout(int cpu)
- {
-+	if (!boot_cpu_has(X86_FEATURE_TSC_ADJUST))
-+		return 30;
- 	return (cpumask_weight(topology_core_cpumask(cpu)) > 1) ? 2 : 20;
- }
- 
-@@ -360,13 +364,16 @@ void check_tsc_sync_source(int cpu)
- 
- 	/*
- 	 * Set the maximum number of test runs to
--	 *  1 if the CPU does not provide the TSC_ADJUST MSR
--	 *  3 if the MSR is available, so the target can try to adjust
-+	 *  5 if we can write TSC_ADJUST to compensate
-+	 *  1000 if we are allowed to write to the TSC MSR to compensate
-+	 *  1 if we cannot write MSRs to synchronize TSCs
- 	 */
--	if (!boot_cpu_has(X86_FEATURE_TSC_ADJUST))
--		atomic_set(&test_runs, 1);
--	else
-+	if (boot_cpu_has(X86_FEATURE_TSC_ADJUST))
- 		atomic_set(&test_runs, 3);
-+	else if (tsc_allow_direct_sync)
-+		atomic_set(&test_runs, 1000);
-+	else
-+		atomic_set(&test_runs, 1);
- retry:
- 	/*
- 	 * Wait for the target to start or to skip the test:
-@@ -434,6 +441,21 @@ void check_tsc_sync_source(int cpu)
- 		goto retry;
- }
- 
-+static inline cycles_t write_tsc_adjustment(s64 adjustment)
-+{
-+	cycles_t adjval, nextval;
-+
-+	rdmsrl(MSR_IA32_TSC, adjval);
-+	adjval += adjustment;
-+	wrmsrl(MSR_IA32_TSC, adjval);
-+	rdmsrl(MSR_IA32_TSC, nextval);
-+
-+	/*
-+	 * Estimated clock cycle overhead for wrmsr + rdmsr
-+	 */
-+	return nextval - adjval;
-+}
-+
- /*
-  * Freshly booted CPUs call into this:
-  */
-@@ -441,7 +463,7 @@ void check_tsc_sync_target(void)
- {
- 	struct tsc_adjust *cur = this_cpu_ptr(&tsc_adjust);
- 	unsigned int cpu = smp_processor_id();
--	cycles_t cur_max_warp, gbl_max_warp;
-+	cycles_t cur_max_warp, gbl_max_warp, est_overhead = 0;
- 	int cpus = 2;
- 
- 	/* Also aborts if there is no TSC. */
-@@ -521,12 +543,18 @@ void check_tsc_sync_target(void)
- 	 * value is used. In the worst case the adjustment needs to go
- 	 * through a 3rd run for fine tuning.
- 	 */
--	cur->adjusted += cur_max_warp;
-+	if (boot_cpu_has(X86_FEATURE_TSC_ADJUST)) {
-+		cur->adjusted += cur_max_warp + est_overhead;
- 
--	pr_warn("TSC ADJUST compensate: CPU%u observed %lld warp. Adjust: %lld\n",
--		cpu, cur_max_warp, cur->adjusted);
-+		pr_warn("TSC ADJUST compensate: CPU%u observed %lld warp. Adjust: %lld\n",
-+			cpu, cur_max_warp, cur->adjusted);
- 
--	wrmsrl(MSR_IA32_TSC_ADJUST, cur->adjusted);
-+		wrmsrl(MSR_IA32_TSC_ADJUST, cur->adjusted);
-+	} else {
-+		pr_debug("TSC direct sync: CPU%u observed %lld warp. Overhead: %lld\n",
-+			cpu, cur_max_warp, est_overhead);
-+		est_overhead = write_tsc_adjustment(cur_max_warp + est_overhead);
-+	}
- 	goto retry;
- 
- }
--- 
-2.37.2
-
-From 374804608da5c3ef56f28d539eefcea23eeff04b Mon Sep 17 00:00:00 2001
-From: Steven Noonan <steven@uplinklabs.net>
-Date: Wed, 17 Nov 2021 11:55:18 -0800
-Subject: [PATCH 29/39] x86: touch clocksource watchdog after syncing TSCs
-
-Signed-off-by: Steven Noonan <steven@uplinklabs.net>
----
- arch/x86/kernel/smpboot.c | 4 ++++
- 1 file changed, 4 insertions(+)
-
-diff --git a/arch/x86/kernel/smpboot.c b/arch/x86/kernel/smpboot.c
-index f24227bc3220..4b3a03004a1f 100644
---- a/arch/x86/kernel/smpboot.c
-+++ b/arch/x86/kernel/smpboot.c
-@@ -56,6 +56,7 @@
- #include <linux/numa.h>
- #include <linux/pgtable.h>
- #include <linux/overflow.h>
-+#include <linux/clocksource.h>
- 
- #include <asm/acpi.h>
- #include <asm/desc.h>
-@@ -1444,6 +1445,7 @@ void arch_thaw_secondary_cpus_begin(void)
- 
- void arch_thaw_secondary_cpus_end(void)
- {
-+	clocksource_touch_watchdog();
- 	mtrr_aps_init();
- }
- 
-@@ -1477,6 +1479,8 @@ void __init native_smp_cpus_done(unsigned int max_cpus)
- {
- 	pr_debug("Boot done\n");
- 
-+	clocksource_touch_watchdog();
-+
- 	calculate_max_logical_packages();
- 
- 	/* XXX for now assume numa-in-package and hybrid don't overlap */
--- 
-2.37.2
-
-From df2a9d58b1355e9de378534f1b9dfb4a08fdabc6 Mon Sep 17 00:00:00 2001
-From: Steven Noonan <steven@uplinklabs.net>
-Date: Wed, 17 Nov 2021 00:26:20 -0800
-Subject: [PATCH 30/39] x86: save/restore TSC counter value during sleep/wake
-
-Signed-off-by: Steven Noonan <steven@uplinklabs.net>
----
- arch/x86/kernel/acpi/sleep.c      |  5 +++++
- arch/x86/realmode/rm/wakeup.h     |  3 +++
- arch/x86/realmode/rm/wakeup_asm.S | 12 ++++++++++++
- 3 files changed, 20 insertions(+)
-
-diff --git a/arch/x86/kernel/acpi/sleep.c b/arch/x86/kernel/acpi/sleep.c
-index 3b7f4cdbf2e0..6829d11185f3 100644
---- a/arch/x86/kernel/acpi/sleep.c
-+++ b/arch/x86/kernel/acpi/sleep.c
-@@ -102,6 +102,11 @@ int x86_acpi_suspend_lowlevel(void)
- 			header->pmode_misc_en_high))
- 		header->pmode_behavior |=
- 			(1 << WAKEUP_BEHAVIOR_RESTORE_MISC_ENABLE);
-+	if (!rdmsr_safe(MSR_IA32_TSC,
-+	                &header->pmode_tsc_low,
-+	                &header->pmode_tsc_high))
-+		header->pmode_behavior |=
-+			(1 << WAKEUP_BEHAVIOR_RESTORE_TSC);
- 	header->realmode_flags = acpi_realmode_flags;
- 	header->real_magic = 0x12345678;
- 
-diff --git a/arch/x86/realmode/rm/wakeup.h b/arch/x86/realmode/rm/wakeup.h
-index 0e4fd08ae447..c728d8563de1 100644
---- a/arch/x86/realmode/rm/wakeup.h
-+++ b/arch/x86/realmode/rm/wakeup.h
-@@ -23,6 +23,8 @@ struct wakeup_header {
- 	u64 pmode_gdt;
- 	u32 pmode_misc_en_low;	/* Protected mode MISC_ENABLE */
- 	u32 pmode_misc_en_high;
-+	u32 pmode_tsc_low;
-+	u32 pmode_tsc_high;
- 	u32 pmode_behavior;	/* Wakeup routine behavior flags */
- 	u32 realmode_flags;
- 	u32 real_magic;
-@@ -39,5 +41,6 @@ extern struct wakeup_header wakeup_header;
- #define WAKEUP_BEHAVIOR_RESTORE_MISC_ENABLE     0
- #define WAKEUP_BEHAVIOR_RESTORE_CR4		1
- #define WAKEUP_BEHAVIOR_RESTORE_EFER		2
-+#define WAKEUP_BEHAVIOR_RESTORE_TSC		3
- 
- #endif /* ARCH_X86_KERNEL_ACPI_RM_WAKEUP_H */
-diff --git a/arch/x86/realmode/rm/wakeup_asm.S b/arch/x86/realmode/rm/wakeup_asm.S
-index 02d0ba16ae33..0154ef895960 100644
---- a/arch/x86/realmode/rm/wakeup_asm.S
-+++ b/arch/x86/realmode/rm/wakeup_asm.S
-@@ -27,6 +27,7 @@ SYM_DATA_START(wakeup_header)
- 	pmode_efer:	.quad	0	/* Saved EFER */
- 	pmode_gdt:	.quad	0
- 	pmode_misc_en:	.quad	0	/* Saved MISC_ENABLE MSR */
-+	pmode_tsc:	.quad	0	/* Saved TSC MSR */
- 	pmode_behavior:	.long	0	/* Wakeup behavior flags */
- 	realmode_flags:	.long	0
- 	real_magic:	.long	0
-@@ -104,6 +105,17 @@ SYM_CODE_START(wakeup_start)
- 	wrmsr
- 1:
- 
-+	/* Restore TSC */
-+	movl	pmode_behavior, %edi
-+	btl	$WAKEUP_BEHAVIOR_RESTORE_TSC, %edi
-+	jnc	1f
-+
-+	movl    pmode_tsc, %eax
-+	movl    pmode_tsc + 4, %edx
-+	movl    $MSR_IA32_TSC, %ecx
-+	wrmsr
-+1:
-+
- 	/* Do any other stuff... */
- 
- #ifndef CONFIG_64BIT
--- 
-2.37.2
-
-From 456dbf4e34242a086a8c4deed416ac35e82db4fd Mon Sep 17 00:00:00 2001
-From: Steven Noonan <steven@uplinklabs.net>
-Date: Wed, 17 Nov 2021 11:58:46 -0800
-Subject: [PATCH 31/39] x86: only restore TSC if we have IA32_TSC_ADJUST or
- directsync enabled
-
-Otherwise we'd only be restoring the TSC for CPU0 on resume, which would
-necessitate a TSC adjustment on other CPUs.
-
-Signed-off-by: Steven Noonan <steven@uplinklabs.net>
----
- arch/x86/kernel/acpi/sleep.c | 6 +++++-
- 1 file changed, 5 insertions(+), 1 deletion(-)
-
-diff --git a/arch/x86/kernel/acpi/sleep.c b/arch/x86/kernel/acpi/sleep.c
-index 6829d11185f3..d8f7ec645f06 100644
---- a/arch/x86/kernel/acpi/sleep.c
-+++ b/arch/x86/kernel/acpi/sleep.c
-@@ -102,11 +102,15 @@ int x86_acpi_suspend_lowlevel(void)
- 			header->pmode_misc_en_high))
- 		header->pmode_behavior |=
- 			(1 << WAKEUP_BEHAVIOR_RESTORE_MISC_ENABLE);
--	if (!rdmsr_safe(MSR_IA32_TSC,
-+
-+	if ((boot_cpu_has(X86_FEATURE_TSC_ADJUST) ||
-+	     tsc_allow_direct_sync) &&
-+	    !rdmsr_safe(MSR_IA32_TSC,
- 	                &header->pmode_tsc_low,
- 	                &header->pmode_tsc_high))
- 		header->pmode_behavior |=
- 			(1 << WAKEUP_BEHAVIOR_RESTORE_TSC);
-+
- 	header->realmode_flags = acpi_realmode_flags;
- 	header->real_magic = 0x12345678;
- 
--- 
-2.37.2
-
-From 3c893cba25c7a3e305e8272d6b7b82c807a25394 Mon Sep 17 00:00:00 2001
-From: Steven Noonan <steven@uplinklabs.net>
-Date: Wed, 17 Nov 2021 19:42:32 -0800
-Subject: [PATCH 32/39] x86: don't check for random warps if using direct sync
-
-There's some overhead in writing/reading MSR_IA32_TSC. We try to account
-for it, but sometimes it under or over estimates the overhead, and we retry
-syncing, and it sees the clock "go backwards".
-
-Signed-off-by: Steven Noonan <steven@uplinklabs.net>
----
- arch/x86/kernel/tsc_sync.c | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
-
-diff --git a/arch/x86/kernel/tsc_sync.c b/arch/x86/kernel/tsc_sync.c
-index d9c4e48d93f6..9d7ab87666fe 100644
---- a/arch/x86/kernel/tsc_sync.c
-+++ b/arch/x86/kernel/tsc_sync.c
-@@ -407,7 +407,7 @@ void check_tsc_sync_source(int cpu)
- 		pr_debug("TSC synchronization [CPU#%d -> CPU#%d]: passed\n",
- 			smp_processor_id(), cpu);
- 
--	} else if (atomic_dec_and_test(&test_runs) || random_warps) {
-+	} else if (atomic_dec_and_test(&test_runs) || (random_warps && !tsc_allow_direct_sync)) {
- 		/* Force it to 0 if random warps brought us here */
- 		atomic_set(&test_runs, 0);
- 
--- 
-2.37.2
-
-From 9d5eca3485f8875dc3563ca817825a721a56c17b Mon Sep 17 00:00:00 2001
-From: Steven Noonan <steven@uplinklabs.net>
-Date: Fri, 19 Nov 2021 16:30:23 -0800
-Subject: [PATCH 33/39] x86: export tsc_khz to userspace
-
-Derived from patch by Redha Gouicem from here:
-
-    https://lkml.org/lkml/2020/12/31/72
-
-Signed-off-by: Steven Noonan <steven@uplinklabs.net>
----
- arch/x86/kernel/tsc.c | 23 +++++++++++++++++++++++
- 1 file changed, 23 insertions(+)
-
-diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
-index b00dde2fd1cc..c31edd75d93d 100644
---- a/arch/x86/kernel/tsc.c
-+++ b/arch/x86/kernel/tsc.c
-@@ -15,6 +15,7 @@
- #include <linux/timex.h>
- #include <linux/static_key.h>
- #include <linux/static_call.h>
-+#include <linux/cpu.h>
- 
- #include <asm/hpet.h>
- #include <asm/timer.h>
-@@ -1438,6 +1439,15 @@ static int __init init_tsc_clocksource(void)
-  */
- device_initcall(init_tsc_clocksource);
- 
-+/* sysfs file to export tsc_khz */
-+static ssize_t tsc_khz_show(struct kobject *kobj,
-+			    struct kobj_attribute *attr, char *buf)
-+{
-+	return sprintf(buf, "%u\n", tsc_khz);
-+}
-+
-+struct kobj_attribute tsc_khz_attr = __ATTR_RO(tsc_khz);
-+
- static bool __init determine_cpu_tsc_frequencies(bool early)
- {
- 	/* Make sure that cpu and tsc are not already calibrated */
-@@ -1556,6 +1566,19 @@ void __init tsc_init(void)
- 	detect_art();
- }
- 
-+static int __init tsc_khz_sysfs_init(void)
-+{
-+	int ret = sysfs_create_file(&cpu_subsys.dev_root->kobj, &tsc_khz_attr.attr);
-+
-+	if (!ret)
-+		pr_info("tsc_khz exported in sysfs\n");
-+	else
-+		pr_warn("tsc_khz failed to be exported in sysfs\n");
-+
-+	return ret;
-+}
-+late_initcall(tsc_khz_sysfs_init);
-+
- #ifdef CONFIG_SMP
- /*
-  * If we have a constant TSC and are using the TSC for the delay loop,
--- 
-2.37.2
-
-
-
-From 167c3c4ab7741ede5e174c56bbbc74c623c37db4 Mon Sep 17 00:00:00 2001
-From: TanapTheTimid <tanapoom.se@gmail.com>
-Date: Tue, 26 Jul 2022 22:30:06 +0700
-Subject: [PATCH] new
-
----
- arch/x86/kernel/tsc.c | 4 +++-
- 1 file changed, 3 insertions(+), 1 deletion(-)
-
-diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
-index a52a167ea..c6755cc0e 100644
---- a/arch/x86/kernel/tsc.c
-+++ b/arch/x86/kernel/tsc.c
-@@ -305,8 +305,10 @@ static int __init tsc_setup(char *str)
- 		mark_tsc_unstable("boot parameter");
- 	if (!strcmp(str, "nowatchdog"))
- 		no_tsc_watchdog = 1;
--	if (!strcmp(str, "directsync"))
-+	if (!strcmp(str, "directsync")) {
- 		tsc_allow_direct_sync = 1;
-+		no_tsc_watchdog = 1;
-+	}
- 	return 1;
- }
- 
--- 
-2.37.1
-
-
 From 2f81e06d1becf5984836f235f0d33adda5f1652d Mon Sep 17 00:00:00 2001
 From: Peter Jung <admin@ptr1337.dev>
 Date: Tue, 25 Oct 2022 00:16:53 +0200
@@ -17047,5 +16599,656 @@ index 22089e37e97f0..fdcfb509cc443 100644
  /*
 -- 
 2.31.1.189.g2e36527f23
+
+
+---
+ drivers/cpuidle/governors/teo.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/cpuidle/governors/teo.c b/drivers/cpuidle/governors/teo.c
+index d9262db79cae..e2864474a98d 100644
+--- a/drivers/cpuidle/governors/teo.c
++++ b/drivers/cpuidle/governors/teo.c
+@@ -258,15 +258,17 @@ static s64 teo_middle_of_bin(int idx, struct cpuidle_driver *drv)
+  * @dev: Target CPU.
+  * @state_idx: Index of the capping idle state.
+  * @duration_ns: Idle duration value to match.
++ * @no_poll: Don't consider polling states.
+  */
+ static int teo_find_shallower_state(struct cpuidle_driver *drv,
+ 				    struct cpuidle_device *dev, int state_idx,
+-				    s64 duration_ns)
++				    s64 duration_ns, bool no_poll)
+ {
+ 	int i;
+ 
+ 	for (i = state_idx - 1; i >= 0; i--) {
+-		if (dev->states_usage[i].disable)
++		if (dev->states_usage[i].disable ||
++				(no_poll && drv->states[i].flags & CPUIDLE_FLAG_POLLING))
+ 			continue;
+ 
+ 		state_idx = i;
+@@ -469,7 +471,7 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
+ 		 */
+ 		if (idx > idx0 &&
+ 		    drv->states[idx].target_residency_ns > delta_tick)
+-			idx = teo_find_shallower_state(drv, dev, idx, delta_tick);
++			idx = teo_find_shallower_state(drv, dev, idx, delta_tick, false);
+ 	}
+ 
+ 	return idx;
+-- 
+2.37.1
+
+  
+
+---
+ drivers/cpuidle/governors/teo.c | 80 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 79 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/cpuidle/governors/teo.c b/drivers/cpuidle/governors/teo.c
+index e2864474a98d..2f37aeba8cb8 100644
+--- a/drivers/cpuidle/governors/teo.c
++++ b/drivers/cpuidle/governors/teo.c
+@@ -2,8 +2,13 @@
+ /*
+  * Timer events oriented CPU idle governor
+  *
++ * TEO governor:
+  * Copyright (C) 2018 - 2021 Intel Corporation
+  * Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
++ *
++ * Util-awareness mechanism:
++ * Copyright (C) 2022 Arm Ltd.
++ * Author: Kajetan Puchalski <kajetan.puchalski@arm.com>
+  */
+ 
+ /**
+@@ -99,14 +104,49 @@
+  *      select the given idle state instead of the candidate one.
+  *
+  * 3. By default, select the candidate state.
++ *
++ * Util-awareness mechanism:
++ *
++ * The idea behind the util-awareness extension is that there are two distinct
++ * scenarios for the CPU which should result in two different approaches to idle
++ * state selection - utilized and not utilized.
++ *
++ * In this case, 'utilized' means that the average runqueue util of the CPU is
++ * above a certain threshold.
++ *
++ * When the CPU is utilized while going into idle, more likely than not it will
++ * be woken up to do more work soon and so a shallower idle state should be
++ * selected to minimise latency and maximise performance. When the CPU is not
++ * being utilized, the usual metrics-based approach to selecting the deepest
++ * available idle state should be preferred to take advantage of the power
++ * saving.
++ *
++ * In order to achieve this, the governor uses a utilization threshold.
++ * The threshold is computed per-cpu as a percentage of the CPU's capacity
++ * by bit shifting the capacity value. Based on testing, the shift of 6 (~1.56%)
++ * seems to be getting the best results.
++ *
++ * Before selecting the next idle state, the governor compares the current CPU
++ * util to the precomputed util threshold. If it's below, it defaults to the
++ * TEO metrics mechanism. If it's above and the currently selected candidate is
++ * C1, the idle state will be reduced to C0 as long as C0 is not a polling state.
+  */
+ 
+ #include <linux/cpuidle.h>
+ #include <linux/jiffies.h>
+ #include <linux/kernel.h>
++#include <linux/sched.h>
+ #include <linux/sched/clock.h>
++#include <linux/sched/topology.h>
+ #include <linux/tick.h>
+ 
++/*
++ * The number of bits to shift the cpu's capacity by in order to determine
++ * the utilized threshold
++ */
++#define UTIL_THRESHOLD_SHIFT 6
++
++
+ /*
+  * The PULSE value is added to metrics when they grow and the DECAY_SHIFT value
+  * is used for decreasing metrics on a regular basis.
+@@ -137,9 +177,11 @@ struct teo_bin {
+  * @time_span_ns: Time between idle state selection and post-wakeup update.
+  * @sleep_length_ns: Time till the closest timer event (at the selection time).
+  * @state_bins: Idle state data bins for this CPU.
+- * @total: Grand total of the "intercepts" and "hits" mertics for all bins.
++ * @total: Grand total of the "intercepts" and "hits" metrics for all bins.
+  * @next_recent_idx: Index of the next @recent_idx entry to update.
+  * @recent_idx: Indices of bins corresponding to recent "intercepts".
++ * @util_threshold: Threshold above which the CPU is considered utilized
++ * @utilized: Whether the last sleep on the CPU happened while utilized
+  */
+ struct teo_cpu {
+ 	s64 time_span_ns;
+@@ -148,10 +190,24 @@ struct teo_cpu {
+ 	unsigned int total;
+ 	int next_recent_idx;
+ 	int recent_idx[NR_RECENT];
++	unsigned long util_threshold;
++	bool utilized;
+ };
+ 
+ static DEFINE_PER_CPU(struct teo_cpu, teo_cpus);
+ 
++/**
++ * teo_get_util - Update the CPU utilized status
++ * @dev: Target CPU
++ * @cpu_data: Governor CPU data for the target CPU
++ */
++static void teo_get_util(struct cpuidle_device *dev, struct teo_cpu *cpu_data)
++{
++	unsigned long util = sched_cpu_util(dev->cpu);
++
++	cpu_data->utilized = util > cpu_data->util_threshold;
++}
++
+ /**
+  * teo_update - Update CPU metrics after wakeup.
+  * @drv: cpuidle driver containing state data.
+@@ -323,6 +379,21 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
+ 			goto end;
+ 	}
+ 
++	teo_get_util(dev, cpu_data);
++	/* the cpu is being utilized and there's only 2 states to choose from */
++	/* no need to consider metrics, choose the shallowest non-polling state and exit */
++	if (drv->state_count < 3 && cpu_data->utilized) {
++		for (i = 0; i < drv->state_count; ++i) {
++			if (dev->states_usage[i].disable ||
++					drv->states[i].flags & CPUIDLE_FLAG_POLLING)
++				continue;
++			break;
++		}
++
++		idx = i;
++		goto end;
++	}
++
+ 	/*
+ 	 * Find the deepest idle state whose target residency does not exceed
+ 	 * the current sleep length and the deepest idle state not deeper than
+@@ -454,6 +525,11 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
+ 	if (idx > constraint_idx)
+ 		idx = constraint_idx;
+ 
++	/* if the CPU is being utilized and C1 is the selected candidate */
++	/* choose a shallower non-polling state to improve latency */
++	if (cpu_data->utilized && idx == 1)
++		idx = teo_find_shallower_state(drv, dev, idx, duration_ns, true);
++
+ end:
+ 	/*
+ 	 * Don't stop the tick if the selected state is a polling one or if the
+@@ -510,9 +586,11 @@ static int teo_enable_device(struct cpuidle_driver *drv,
+ 			     struct cpuidle_device *dev)
+ {
+ 	struct teo_cpu *cpu_data = per_cpu_ptr(&teo_cpus, dev->cpu);
++	unsigned long max_capacity = arch_scale_cpu_capacity(dev->cpu);
+ 	int i;
+ 
+ 	memset(cpu_data, 0, sizeof(*cpu_data));
++	cpu_data->util_threshold = max_capacity >> UTIL_THRESHOLD_SHIFT;
+ 
+ 	for (i = 0; i < NR_RECENT; i++)
+ 		cpu_data->recent_idx[i] = -1;
+-- 
+2.37.1
+
+  
+
+From 3193dbff37baf37af72f11bdcfbe3705d74ba5fa Mon Sep 17 00:00:00 2001
+From: Steven Noonan <steven@uplinklabs.net>
+Date: Wed, 17 Nov 2021 00:25:26 -0800
+Subject: [PATCH 28/39] x86: implement tsc=directsync for systems without
+ IA32_TSC_ADJUST
+
+Signed-off-by: Steven Noonan <steven@uplinklabs.net>
+---
+ .../admin-guide/kernel-parameters.txt         |  2 +
+ arch/x86/include/asm/tsc.h                    |  1 +
+ arch/x86/kernel/tsc.c                         |  3 ++
+ arch/x86/kernel/tsc_sync.c                    | 48 +++++++++++++++----
+ 4 files changed, 44 insertions(+), 10 deletions(-)
+
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index c14b59da2319..d3a3377df9e4 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -6311,6 +6311,8 @@
+ 			in situations with strict latency requirements (where
+ 			interruptions from clocksource watchdog are not
+ 			acceptable).
++			[x86] directsync: attempt to sync the tsc via direct
++			writes if MSR_IA32_TSC_ADJUST isn't available
+ 
+ 	tsc_early_khz=  [X86] Skip early TSC calibration and use the given
+ 			value instead. Useful when the early TSC frequency discovery
+diff --git a/arch/x86/include/asm/tsc.h b/arch/x86/include/asm/tsc.h
+index fbdc3d951494..dc70909119e8 100644
+--- a/arch/x86/include/asm/tsc.h
++++ b/arch/x86/include/asm/tsc.h
+@@ -42,6 +42,7 @@ extern unsigned long native_calibrate_tsc(void);
+ extern unsigned long long native_sched_clock_from_tsc(u64 tsc);
+ 
+ extern int tsc_clocksource_reliable;
++extern int tsc_allow_direct_sync;
+ #ifdef CONFIG_X86_TSC
+ extern bool tsc_async_resets;
+ #else
+diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
+index c2f80184fd33..b00dde2fd1cc 100644
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -47,6 +47,7 @@ static unsigned int __initdata tsc_early_khz;
+ static DEFINE_STATIC_KEY_FALSE(__use_tsc);
+ 
+ int tsc_clocksource_reliable;
++int tsc_allow_direct_sync;
+ 
+ static u32 art_to_tsc_numerator;
+ static u32 art_to_tsc_denominator;
+@@ -303,6 +304,8 @@ static int __init tsc_setup(char *str)
+ 		mark_tsc_unstable("boot parameter");
+ 	if (!strcmp(str, "nowatchdog"))
+ 		no_tsc_watchdog = 1;
++	if (!strcmp(str, "directsync"))
++		tsc_allow_direct_sync = 1;
+ 	return 1;
+ }
+ 
+diff --git a/arch/x86/kernel/tsc_sync.c b/arch/x86/kernel/tsc_sync.c
+index 9452dc9664b5..d9c4e48d93f6 100644
+--- a/arch/x86/kernel/tsc_sync.c
++++ b/arch/x86/kernel/tsc_sync.c
+@@ -32,6 +32,8 @@ struct tsc_adjust {
+ static DEFINE_PER_CPU(struct tsc_adjust, tsc_adjust);
+ static struct timer_list tsc_sync_check_timer;
+ 
++extern int tsc_allow_direct_sync;
++
+ /*
+  * TSC's on different sockets may be reset asynchronously.
+  * This may cause the TSC ADJUST value on socket 0 to be NOT 0.
+@@ -340,6 +342,8 @@ static cycles_t check_tsc_warp(unsigned int timeout)
+  */
+ static inline unsigned int loop_timeout(int cpu)
+ {
++	if (!boot_cpu_has(X86_FEATURE_TSC_ADJUST))
++		return 30;
+ 	return (cpumask_weight(topology_core_cpumask(cpu)) > 1) ? 2 : 20;
+ }
+ 
+@@ -360,13 +364,16 @@ void check_tsc_sync_source(int cpu)
+ 
+ 	/*
+ 	 * Set the maximum number of test runs to
+-	 *  1 if the CPU does not provide the TSC_ADJUST MSR
+-	 *  3 if the MSR is available, so the target can try to adjust
++	 *  5 if we can write TSC_ADJUST to compensate
++	 *  1000 if we are allowed to write to the TSC MSR to compensate
++	 *  1 if we cannot write MSRs to synchronize TSCs
+ 	 */
+-	if (!boot_cpu_has(X86_FEATURE_TSC_ADJUST))
+-		atomic_set(&test_runs, 1);
+-	else
++	if (boot_cpu_has(X86_FEATURE_TSC_ADJUST))
+ 		atomic_set(&test_runs, 3);
++	else if (tsc_allow_direct_sync)
++		atomic_set(&test_runs, 1000);
++	else
++		atomic_set(&test_runs, 1);
+ retry:
+ 	/*
+ 	 * Wait for the target to start or to skip the test:
+@@ -434,6 +441,21 @@ void check_tsc_sync_source(int cpu)
+ 		goto retry;
+ }
+ 
++static inline cycles_t write_tsc_adjustment(s64 adjustment)
++{
++	cycles_t adjval, nextval;
++
++	rdmsrl(MSR_IA32_TSC, adjval);
++	adjval += adjustment;
++	wrmsrl(MSR_IA32_TSC, adjval);
++	rdmsrl(MSR_IA32_TSC, nextval);
++
++	/*
++	 * Estimated clock cycle overhead for wrmsr + rdmsr
++	 */
++	return nextval - adjval;
++}
++
+ /*
+  * Freshly booted CPUs call into this:
+  */
+@@ -441,7 +463,7 @@ void check_tsc_sync_target(void)
+ {
+ 	struct tsc_adjust *cur = this_cpu_ptr(&tsc_adjust);
+ 	unsigned int cpu = smp_processor_id();
+-	cycles_t cur_max_warp, gbl_max_warp;
++	cycles_t cur_max_warp, gbl_max_warp, est_overhead = 0;
+ 	int cpus = 2;
+ 
+ 	/* Also aborts if there is no TSC. */
+@@ -521,12 +543,18 @@ void check_tsc_sync_target(void)
+ 	 * value is used. In the worst case the adjustment needs to go
+ 	 * through a 3rd run for fine tuning.
+ 	 */
+-	cur->adjusted += cur_max_warp;
++	if (boot_cpu_has(X86_FEATURE_TSC_ADJUST)) {
++		cur->adjusted += cur_max_warp + est_overhead;
+ 
+-	pr_warn("TSC ADJUST compensate: CPU%u observed %lld warp. Adjust: %lld\n",
+-		cpu, cur_max_warp, cur->adjusted);
++		pr_warn("TSC ADJUST compensate: CPU%u observed %lld warp. Adjust: %lld\n",
++			cpu, cur_max_warp, cur->adjusted);
+ 
+-	wrmsrl(MSR_IA32_TSC_ADJUST, cur->adjusted);
++		wrmsrl(MSR_IA32_TSC_ADJUST, cur->adjusted);
++	} else {
++		pr_debug("TSC direct sync: CPU%u observed %lld warp. Overhead: %lld\n",
++			cpu, cur_max_warp, est_overhead);
++		est_overhead = write_tsc_adjustment(cur_max_warp + est_overhead);
++	}
+ 	goto retry;
+ 
+ }
+-- 
+2.37.2
+
+From 374804608da5c3ef56f28d539eefcea23eeff04b Mon Sep 17 00:00:00 2001
+From: Steven Noonan <steven@uplinklabs.net>
+Date: Wed, 17 Nov 2021 11:55:18 -0800
+Subject: [PATCH 29/39] x86: touch clocksource watchdog after syncing TSCs
+
+Signed-off-by: Steven Noonan <steven@uplinklabs.net>
+---
+ arch/x86/kernel/smpboot.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/arch/x86/kernel/smpboot.c b/arch/x86/kernel/smpboot.c
+index f24227bc3220..4b3a03004a1f 100644
+--- a/arch/x86/kernel/smpboot.c
++++ b/arch/x86/kernel/smpboot.c
+@@ -56,6 +56,7 @@
+ #include <linux/numa.h>
+ #include <linux/pgtable.h>
+ #include <linux/overflow.h>
++#include <linux/clocksource.h>
+ 
+ #include <asm/acpi.h>
+ #include <asm/desc.h>
+@@ -1444,6 +1445,7 @@ void arch_thaw_secondary_cpus_begin(void)
+ 
+ void arch_thaw_secondary_cpus_end(void)
+ {
++	clocksource_touch_watchdog();
+ 	mtrr_aps_init();
+ }
+ 
+@@ -1477,6 +1479,8 @@ void __init native_smp_cpus_done(unsigned int max_cpus)
+ {
+ 	pr_debug("Boot done\n");
+ 
++	clocksource_touch_watchdog();
++
+ 	calculate_max_logical_packages();
+ 
+ 	/* XXX for now assume numa-in-package and hybrid don't overlap */
+-- 
+2.37.2
+
+From df2a9d58b1355e9de378534f1b9dfb4a08fdabc6 Mon Sep 17 00:00:00 2001
+From: Steven Noonan <steven@uplinklabs.net>
+Date: Wed, 17 Nov 2021 00:26:20 -0800
+Subject: [PATCH 30/39] x86: save/restore TSC counter value during sleep/wake
+
+Signed-off-by: Steven Noonan <steven@uplinklabs.net>
+---
+ arch/x86/kernel/acpi/sleep.c      |  5 +++++
+ arch/x86/realmode/rm/wakeup.h     |  3 +++
+ arch/x86/realmode/rm/wakeup_asm.S | 12 ++++++++++++
+ 3 files changed, 20 insertions(+)
+
+diff --git a/arch/x86/kernel/acpi/sleep.c b/arch/x86/kernel/acpi/sleep.c
+index 3b7f4cdbf2e0..6829d11185f3 100644
+--- a/arch/x86/kernel/acpi/sleep.c
++++ b/arch/x86/kernel/acpi/sleep.c
+@@ -102,6 +102,11 @@ int x86_acpi_suspend_lowlevel(void)
+ 			header->pmode_misc_en_high))
+ 		header->pmode_behavior |=
+ 			(1 << WAKEUP_BEHAVIOR_RESTORE_MISC_ENABLE);
++	if (!rdmsr_safe(MSR_IA32_TSC,
++	                &header->pmode_tsc_low,
++	                &header->pmode_tsc_high))
++		header->pmode_behavior |=
++			(1 << WAKEUP_BEHAVIOR_RESTORE_TSC);
+ 	header->realmode_flags = acpi_realmode_flags;
+ 	header->real_magic = 0x12345678;
+ 
+diff --git a/arch/x86/realmode/rm/wakeup.h b/arch/x86/realmode/rm/wakeup.h
+index 0e4fd08ae447..c728d8563de1 100644
+--- a/arch/x86/realmode/rm/wakeup.h
++++ b/arch/x86/realmode/rm/wakeup.h
+@@ -23,6 +23,8 @@ struct wakeup_header {
+ 	u64 pmode_gdt;
+ 	u32 pmode_misc_en_low;	/* Protected mode MISC_ENABLE */
+ 	u32 pmode_misc_en_high;
++	u32 pmode_tsc_low;
++	u32 pmode_tsc_high;
+ 	u32 pmode_behavior;	/* Wakeup routine behavior flags */
+ 	u32 realmode_flags;
+ 	u32 real_magic;
+@@ -39,5 +41,6 @@ extern struct wakeup_header wakeup_header;
+ #define WAKEUP_BEHAVIOR_RESTORE_MISC_ENABLE     0
+ #define WAKEUP_BEHAVIOR_RESTORE_CR4		1
+ #define WAKEUP_BEHAVIOR_RESTORE_EFER		2
++#define WAKEUP_BEHAVIOR_RESTORE_TSC		3
+ 
+ #endif /* ARCH_X86_KERNEL_ACPI_RM_WAKEUP_H */
+diff --git a/arch/x86/realmode/rm/wakeup_asm.S b/arch/x86/realmode/rm/wakeup_asm.S
+index 02d0ba16ae33..0154ef895960 100644
+--- a/arch/x86/realmode/rm/wakeup_asm.S
++++ b/arch/x86/realmode/rm/wakeup_asm.S
+@@ -27,6 +27,7 @@ SYM_DATA_START(wakeup_header)
+ 	pmode_efer:	.quad	0	/* Saved EFER */
+ 	pmode_gdt:	.quad	0
+ 	pmode_misc_en:	.quad	0	/* Saved MISC_ENABLE MSR */
++	pmode_tsc:	.quad	0	/* Saved TSC MSR */
+ 	pmode_behavior:	.long	0	/* Wakeup behavior flags */
+ 	realmode_flags:	.long	0
+ 	real_magic:	.long	0
+@@ -104,6 +105,17 @@ SYM_CODE_START(wakeup_start)
+ 	wrmsr
+ 1:
+ 
++	/* Restore TSC */
++	movl	pmode_behavior, %edi
++	btl	$WAKEUP_BEHAVIOR_RESTORE_TSC, %edi
++	jnc	1f
++
++	movl    pmode_tsc, %eax
++	movl    pmode_tsc + 4, %edx
++	movl    $MSR_IA32_TSC, %ecx
++	wrmsr
++1:
++
+ 	/* Do any other stuff... */
+ 
+ #ifndef CONFIG_64BIT
+-- 
+2.37.2
+
+From 456dbf4e34242a086a8c4deed416ac35e82db4fd Mon Sep 17 00:00:00 2001
+From: Steven Noonan <steven@uplinklabs.net>
+Date: Wed, 17 Nov 2021 11:58:46 -0800
+Subject: [PATCH 31/39] x86: only restore TSC if we have IA32_TSC_ADJUST or
+ directsync enabled
+
+Otherwise we'd only be restoring the TSC for CPU0 on resume, which would
+necessitate a TSC adjustment on other CPUs.
+
+Signed-off-by: Steven Noonan <steven@uplinklabs.net>
+---
+ arch/x86/kernel/acpi/sleep.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kernel/acpi/sleep.c b/arch/x86/kernel/acpi/sleep.c
+index 6829d11185f3..d8f7ec645f06 100644
+--- a/arch/x86/kernel/acpi/sleep.c
++++ b/arch/x86/kernel/acpi/sleep.c
+@@ -102,11 +102,15 @@ int x86_acpi_suspend_lowlevel(void)
+ 			header->pmode_misc_en_high))
+ 		header->pmode_behavior |=
+ 			(1 << WAKEUP_BEHAVIOR_RESTORE_MISC_ENABLE);
+-	if (!rdmsr_safe(MSR_IA32_TSC,
++
++	if ((boot_cpu_has(X86_FEATURE_TSC_ADJUST) ||
++	     tsc_allow_direct_sync) &&
++	    !rdmsr_safe(MSR_IA32_TSC,
+ 	                &header->pmode_tsc_low,
+ 	                &header->pmode_tsc_high))
+ 		header->pmode_behavior |=
+ 			(1 << WAKEUP_BEHAVIOR_RESTORE_TSC);
++
+ 	header->realmode_flags = acpi_realmode_flags;
+ 	header->real_magic = 0x12345678;
+ 
+-- 
+2.37.2
+
+From 3c893cba25c7a3e305e8272d6b7b82c807a25394 Mon Sep 17 00:00:00 2001
+From: Steven Noonan <steven@uplinklabs.net>
+Date: Wed, 17 Nov 2021 19:42:32 -0800
+Subject: [PATCH 32/39] x86: don't check for random warps if using direct sync
+
+There's some overhead in writing/reading MSR_IA32_TSC. We try to account
+for it, but sometimes it under or over estimates the overhead, and we retry
+syncing, and it sees the clock "go backwards".
+
+Signed-off-by: Steven Noonan <steven@uplinklabs.net>
+---
+ arch/x86/kernel/tsc_sync.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/x86/kernel/tsc_sync.c b/arch/x86/kernel/tsc_sync.c
+index d9c4e48d93f6..9d7ab87666fe 100644
+--- a/arch/x86/kernel/tsc_sync.c
++++ b/arch/x86/kernel/tsc_sync.c
+@@ -407,7 +407,7 @@ void check_tsc_sync_source(int cpu)
+ 		pr_debug("TSC synchronization [CPU#%d -> CPU#%d]: passed\n",
+ 			smp_processor_id(), cpu);
+ 
+-	} else if (atomic_dec_and_test(&test_runs) || random_warps) {
++	} else if (atomic_dec_and_test(&test_runs) || (random_warps && !tsc_allow_direct_sync)) {
+ 		/* Force it to 0 if random warps brought us here */
+ 		atomic_set(&test_runs, 0);
+ 
+-- 
+2.37.2
+
+From 9d5eca3485f8875dc3563ca817825a721a56c17b Mon Sep 17 00:00:00 2001
+From: Steven Noonan <steven@uplinklabs.net>
+Date: Fri, 19 Nov 2021 16:30:23 -0800
+Subject: [PATCH 33/39] x86: export tsc_khz to userspace
+
+Derived from patch by Redha Gouicem from here:
+
+    https://lkml.org/lkml/2020/12/31/72
+
+Signed-off-by: Steven Noonan <steven@uplinklabs.net>
+---
+ arch/x86/kernel/tsc.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
+index b00dde2fd1cc..c31edd75d93d 100644
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -15,6 +15,7 @@
+ #include <linux/timex.h>
+ #include <linux/static_key.h>
+ #include <linux/static_call.h>
++#include <linux/cpu.h>
+ 
+ #include <asm/hpet.h>
+ #include <asm/timer.h>
+@@ -1438,6 +1439,15 @@ static int __init init_tsc_clocksource(void)
+  */
+ device_initcall(init_tsc_clocksource);
+ 
++/* sysfs file to export tsc_khz */
++static ssize_t tsc_khz_show(struct kobject *kobj,
++			    struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%u\n", tsc_khz);
++}
++
++struct kobj_attribute tsc_khz_attr = __ATTR_RO(tsc_khz);
++
+ static bool __init determine_cpu_tsc_frequencies(bool early)
+ {
+ 	/* Make sure that cpu and tsc are not already calibrated */
+@@ -1556,6 +1566,19 @@ void __init tsc_init(void)
+ 	detect_art();
+ }
+ 
++static int __init tsc_khz_sysfs_init(void)
++{
++	int ret = sysfs_create_file(&cpu_subsys.dev_root->kobj, &tsc_khz_attr.attr);
++
++	if (!ret)
++		pr_info("tsc_khz exported in sysfs\n");
++	else
++		pr_warn("tsc_khz failed to be exported in sysfs\n");
++
++	return ret;
++}
++late_initcall(tsc_khz_sysfs_init);
++
+ #ifdef CONFIG_SMP
+ /*
+  * If we have a constant TSC and are using the TSC for the delay loop,
+-- 
+2.37.2
+
+
+
+From 167c3c4ab7741ede5e174c56bbbc74c623c37db4 Mon Sep 17 00:00:00 2001
+From: TanapTheTimid <tanapoom.se@gmail.com>
+Date: Tue, 26 Jul 2022 22:30:06 +0700
+Subject: [PATCH] new
+
+---
+ arch/x86/kernel/tsc.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
+index a52a167ea..c6755cc0e 100644
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -305,8 +305,10 @@ static int __init tsc_setup(char *str)
+ 		mark_tsc_unstable("boot parameter");
+ 	if (!strcmp(str, "nowatchdog"))
+ 		no_tsc_watchdog = 1;
+-	if (!strcmp(str, "directsync"))
++	if (!strcmp(str, "directsync")) {
+ 		tsc_allow_direct_sync = 1;
++		no_tsc_watchdog = 1;
++	}
+ 	return 1;
+ }
+ 
+-- 
+2.37.1
 
 
