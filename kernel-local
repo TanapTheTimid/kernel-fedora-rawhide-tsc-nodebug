@@ -2,8 +2,6 @@
 # added for those wanting to do custom rebuilds with altered config opts.
 
 CONFIG_RCU_LAZY=y
-CONFIG_CPU_IDLE_GOV_TEO=y
-# CONFIG_CPU_IDLE_GOV_MENU is not set
 
 # CONFIG_FTRACE is not set
 # CONFIG_PM_DEBUG is not set
