@@ -124,13 +124,13 @@ Summary: The Linux kernel
 %define buildid .cust
 %define specversion 6.1.0
 %define patchversion 6.1
-%define pkgrelease 0.rc3.20221102git8f71a2b3f435.29
+%define pkgrelease 0.rc4.20221111git4bbf3422df78.39
 %define kversion 6
-%define tarfile_release 6.1-rc3-45-g8f71a2b3f435
+%define tarfile_release 6.1-rc4-159-g4bbf3422df78
 # This is needed to do merge window version magic
 %define patchlevel 1
 # This allows pkg_release to have configurable %%{?dist} tag
-%define specrelease 0.rc3.20221102git8f71a2b3f435.29%{?buildid}%{?dist}
+%define specrelease 0.rc4.20221111git4bbf3422df78.39%{?buildid}%{?dist}
 # This defines the kabi tarball version
 %define kabiversion 6.1.0
 
@@ -3191,8 +3191,50 @@ fi
 #
 #
 %changelog
-* Wed Nov 02 2022 Justin M. Forbes <jforbes@fedoraproject.org> [6.1.0-0.rc3.20221102git8f71a2b3f435.29]
+* Fri Nov 11 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc4.4bbf3422df78.39]
+- fs: fix leaked psi pressure state (Johannes Weiner)
+
+* Fri Nov 11 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc4.4bbf3422df78.38]
+- Linux v6.1.0-0.rc4.4bbf3422df78
+
+* Thu Nov 10 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc4.f67dd6ce0723.37]
+- redhat: fix selftest git command so it picks the right commit (Patrick Talbert)
+- Linux v6.1.0-0.rc4.f67dd6ce0723
+
+* Wed Nov 09 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc4.f141df371335.36]
+- redhat/configs: enable HP_WATCHDOG for aarch64 (Mark Salter)
+- redhat: disable Kfence Kunit Test (Nico Pache)
+- configs: enable CONFIG_LRU_GEN_ENABLED everywhere (Patrick Talbert)
+- redhat: Enable WWAN feature and support for Intel, Qualcomm and Mediatek devices (Jose Ignacio Tornos Martinez)
+- Turn on dln2 support (RHBZ 2110372) (Justin M. Forbes)
+- Linux v6.1.0-0.rc4.f141df371335
+
+* Tue Nov 08 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc4.59f2f4b8a757.35]
+- Enable configs for imx8m PHYs (Al Stone)
+- configs/fedora: Build some SC7180 clock controllers as modules (Javier Martinez Canillas)
+- redhat/configs: Disable fbdev drivers and use simpledrm everywhere (Javier Martinez Canillas) [1986223]
+- redhat: fix the branch we pull from the documentation tree (Herton R. Krzesinski)
+- redhat/configs: change so watchdog is module versus builtin (Steve Best)
+- Linux v6.1.0-0.rc4.59f2f4b8a757
+
+* Mon Nov 07 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc4.34]
+- redhat/configs: move CONFIG_ACPI_VIDEO to common/generic (Mark Langsdorf)
+- enable imx8xm I2C configs properly (Al Stone)
+- Linux v6.1.0-0.rc4
+
+* Sun Nov 06 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc3.2f5065a0bc9d.33]
+- Linux v6.1.0-0.rc3.2f5065a0bc9d
+
+* Sat Nov 05 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc3.b208b9fbbcba.32]
+- Linux v6.1.0-0.rc3.b208b9fbbcba
+
+* Fri Nov 04 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc3.ee6050c8af96.31]
+- Linux v6.1.0-0.rc3.ee6050c8af96
+
+* Thu Nov 03 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc3.8e5423e991e8.30]
 - configs/fedora: Enable a few more drivers needed by the HP X2 Chromebook (Javier Martinez Canillas)
+- enable the rtc-rv8803 driver on RHEL and Fedora (David Arcari)
+- Linux v6.1.0-0.rc3.8e5423e991e8
 
 * Wed Nov 02 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc3.8f71a2b3f435.29]
 - redhat/Makefile: Remove BUILD_SCRATCH_TARGET (Prarit Bhargava)
