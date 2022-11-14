@@ -124,13 +124,13 @@ Summary: The Linux kernel
 %define buildid .cust
 %define specversion 6.1.0
 %define patchversion 6.1
-%define pkgrelease 0.rc4.20221111git4bbf3422df78.39
+%define pkgrelease 0.rc5.39
 %define kversion 6
-%define tarfile_release 6.1-rc4-159-g4bbf3422df78
+%define tarfile_release 6.1-rc5
 # This is needed to do merge window version magic
 %define patchlevel 1
 # This allows pkg_release to have configurable %%{?dist} tag
-%define specrelease 0.rc4.20221111git4bbf3422df78.39%{?buildid}%{?dist}
+%define specrelease 0.rc5.39%{?buildid}%{?dist}
 # This defines the kabi tarball version
 %define kabiversion 6.1.0
 
@@ -3191,8 +3191,8 @@ fi
 #
 #
 %changelog
-* Fri Nov 11 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc4.4bbf3422df78.39]
-- fs: fix leaked psi pressure state (Johannes Weiner)
+* Mon Nov 14 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc5.39]
+- Linux v6.1.0-0.rc5
 
 * Fri Nov 11 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc4.4bbf3422df78.38]
 - Linux v6.1.0-0.rc4.4bbf3422df78
