@@ -119,18 +119,18 @@ Summary: The Linux kernel
 # Set debugbuildsenabled to 0 to not build a separate debug kernel, but
 #  to build the base kernel using the debug configuration. (Specifying
 #  the --with-release option overrides this setting.)
-%define debugbuildsenabled 1
+%define debugbuildsenabled 0
 # define buildid .local
 %define buildid .cust
 %define specversion 6.1.0
 %define patchversion 6.1
-%define pkgrelease 0.rc5.39
+%define pkgrelease 0.rc5.20221116git59d0d52c30d4.41
 %define kversion 6
-%define tarfile_release 6.1-rc5
+%define tarfile_release 6.1-rc5-18-g59d0d52c30d4
 # This is needed to do merge window version magic
 %define patchlevel 1
 # This allows pkg_release to have configurable %%{?dist} tag
-%define specrelease 0.rc5.39%{?buildid}%{?dist}
+%define specrelease 0.rc5.20221116git59d0d52c30d4.41%{?buildid}%{?dist}
 # This defines the kabi tarball version
 %define kabiversion 6.1.0
 
@@ -3191,6 +3191,18 @@ fi
 #
 #
 %changelog
+* Wed Nov 16 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc5.59d0d52c30d4.41]
+- Linux v6.1.0-0.rc5.59d0d52c30d4
+
+* Tue Nov 15 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc5.e01d50cbd6ee.40]
+- redhat: avoid picking up stray editor backups when processing configs (Clark Williams)
+- CI: Remove old configs (Veronika Kabatova)
+- redhat: override `make help` to include dist-help (Jonathan Toppins)
+- redhat: make RHTEST stricter (Jonathan Toppins)
+- redhat: Enable support for SN2201 system (Ivan Vecera)
+- redhat/docs/index.rst: Add FLAVOR information to generate configs for local builds (Enric Balletbo i Serra)
+- Linux v6.1.0-0.rc5.e01d50cbd6ee
+
 * Mon Nov 14 2022 Fedora Kernel Team <kernel-team@fedoraproject.org> [6.1.0-0.rc5.39]
 - Linux v6.1.0-0.rc5
 
