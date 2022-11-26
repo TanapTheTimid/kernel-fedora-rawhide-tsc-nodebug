@@ -11,10 +11,12 @@ CONFIG_RCU_LAZY=y
 # CONFIG_DEBUG_PREEMPT is not set
 # CONFIG_DEBUG_VM is not set
 
+# CONFIG_AUDITSYSCALL is not set
+# CONFIG_AUDIT is not set
+# CONFIG_PROFILING is not set
 
 # CONFIG_DAMON is not set
 # CONFIG_SECURITY is not set
-
 
 # CONFIG_NETWORK_SECMARK is not set
 # CONFIG_IMA_SECURE_AND_OR_TRUSTED_BOOT is not set
